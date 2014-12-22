@@ -39,7 +39,7 @@ abstract class AuthAbstract extends Controller
      *
      * @var Array
      */
-    private $non_forward_urls = array('user/login', 'user/forgot');
+    private $_non_forward_urls = array('user/login', 'user/forgot');
 
     /**
      * Performs login validation
@@ -71,7 +71,7 @@ abstract class AuthAbstract extends Controller
             ? $this->session->flashdata('url_after_login') : $referer;
 
         // List different routes we don't want to reroute to
-        $bad_routes = $this->non_forward_urls;
+        $bad_routes = $this->_non_forward_urls;
 
         foreach ($bad_routes as $route) {
             if (strstr($to, $route)) {
@@ -99,11 +99,12 @@ abstract class AuthAbstract extends Controller
     ) {
         $arr = array(
             'username'         => $username,
-            'password'         => $password,
+            'password'         => password_hash($password, PASSWORD_DEFAULT),
             'email'            => $email,
             'full_name'        => $fullname,
             'twitter_username' => $twitter_name,
             'active'           => 1,
+            'verified'         => 1,
             'last_login'       => time()
         );
         $this->db->insert('user', $arr);

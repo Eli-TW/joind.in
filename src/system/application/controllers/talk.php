@@ -260,7 +260,10 @@ class Talk extends Controller
 
         if ($this->validation->run() != false) {
             // store the session length in the session, as a handy shortcut
-            $this->session->set_userdata('duration', (int)$this->input->post('duration'));
+            $this->session->set_userdata(
+                'duration',
+                (int)$this->input->post('duration')
+            );
 
             if (!empty($thisTalksEvent->event_tz_cont)
                 && !empty($thisTalksEvent->event_tz_place)
@@ -279,7 +282,7 @@ class Talk extends Controller
                 $this->input->post('given_min'), $talk_timezone
             );
 
-            $unix_timestamp  = $talk_datetime->format("U");
+            $unix_timestamp = $talk_datetime->format("U");
 
             $arr = array(
                 'talk_title'  => $this->input->post('talk_title'),
@@ -348,6 +351,8 @@ class Talk extends Controller
                 if (count($ret) == 0) {
                     $this->db->insert('talks', $arr);
                     $tc_id = $this->db->insert_id();
+
+                    $this->event_model->cacheTalkCount($thisTalksEvent->ID);
 
                     // Add the new speakers
                     $this->talkSpeakers->handleSpeakerData(
@@ -436,6 +441,7 @@ class Talk extends Controller
     function delete($id)
     {
         $this->load->model('talks_model');
+        $this->load->model('event_model');
         $this->load->model('user_model');
         $this->load->model('talk_track_model', 'talkTracks');
 
@@ -461,6 +467,8 @@ class Talk extends Controller
             $arr['tid'] = $id;
             if (isset($_POST['answer']) && ($_POST['answer'] == 'yes')) {
                 $this->talks_model->deleteTalk($id);
+
+                $this->event_model->cacheTalkCount($talk_detail[0]->eid);
 
                 // delete any records in the tracks table too
                 $this->talkTracks->deleteSessionTrack($id);
@@ -498,7 +506,7 @@ class Talk extends Controller
         $this->load->helper('talk');
         $this->load->helper('reqkey');
         $this->load->plugin('captcha');
-        $this->load->library('defensio');
+        $this->load->library('spamcheckservice', array('api_key' => $this->config->item('akismet_key')));
         $this->load->library('spam');
         $this->load->library('validation');
         $this->load->library('timezone');
@@ -602,10 +610,20 @@ class Talk extends Controller
             $claim_user_ids[] = $claim_item->userid;
         }
 
-        $rating_rule = (in_array($currentUserId, $claim_user_ids)
-            || ($already_rated)) ? null : 'required';
+        // comment form validation rules:
+        // rating:
+        //      1. rating_check to ensure between 0 and 5
+        //      2. required field if not already commented
+        // comment:
+        //      1. duplicate_comment_check to ensure exact comment isn't posted twice
+        $rating_rule = 'callback_rating_check';
+        $rating_rule .= (in_array($currentUserId, $claim_user_ids)
+            || ($already_rated)) ? '' : 'required';
 
-        $rules = array('rating' => $rating_rule);
+        $rules = array(
+            'rating' => $rating_rule,
+            'comment' => "callback_duplicate_comment_check[$id]",
+        );
 
         $fields = array(
             'comment' => 'Comment',
@@ -650,23 +668,25 @@ class Talk extends Controller
                     $ec['cname']   = $this->input->post('cname');
                 }
 
-                $ec['comment'] = $this->input->post('comment');
-                $def_ret       = $this->defensio->check(
-                    $ec['cname'], $ec['comment'], $is_auth, '/talk/view/' . $id
-                );
-
-                $is_spam = (string) $def_ret->spam;
+                $ec['comment']      = $this->input->post('comment');
+                $acceptable_comment = $this->spamcheckservice->isCommentAcceptable(array(
+                    'comment' => $ec['comment'],
+                ));
             } else {
                 // They're logged in, let their comments through
-                $is_spam = false;
-                $sp_ret  = true;
+                $acceptable_comment = true;
+                $is_spam             = false;
+                $sp_ret              = true;
             }
 
-            if ($is_spam != 'true' && $sp_ret == true) {
+            if ($acceptable_comment && $sp_ret == true) {
+
+                // if the user has already rated, then the rating for this comment is zero
+                $rating = $already_rated ? 0 : $this->input->post('rating');
 
                 $arr = array(
                     'talk_id'   => $id,
-                    'rating'    => $this->input->post('rating'),
+                    'rating'    => $rating,
                     'comment'   => $this->input->post('comment'),
                     'date_made' => time(), 'private' => $priv,
                     'active'    => 1,
@@ -777,8 +797,12 @@ class Talk extends Controller
             for ($i = 0; $i < count($talk_comments['comment']); $i++) {
                 if ($talk_comments['comment'][$i]->user_id != 0) {
                     $talk_comments['comment'][$i]->user_comment_count =
-                        $this->event_comments_model->getUserCommentCount($talk_comments['comment'][$i]->user_id) +
-                        $this->tcm->getUserCommentCount($talk_comments['comment'][$i]->user_id);
+                        $this->event_comments_model->getUserCommentCount(
+                            $talk_comments['comment'][$i]->user_id
+                        ) +
+                        $this->tcm->getUserCommentCount(
+                            $talk_comments['comment'][$i]->user_id
+                        );
                 }
             }
         }
@@ -1090,6 +1114,61 @@ class Talk extends Controller
             return false;
         }
 
+        return true;
+    }
+
+    /**
+     * Validates whether the given rating is between 0 and 5
+     *
+     * @param string $str The string to validate.
+     *
+     * @return bool
+     */
+    function rating_check($str)
+    {
+        if (is_numeric($str)) {
+            if ($str >= 0 && $str <= 5) {
+                return true;
+            }
+        }
+        
+        $this->validation->set_message(
+            'rating_check',
+            'Rating is out of bounds.'
+        );
+
+        return false;
+    }
+
+    /**
+     * Validates whether the given comment is identical to one that this user
+     * has given before for this talk
+     *
+     * @param string $str    The string to validate.
+     * @param number $talkId The current talk id
+     *
+     * @return bool
+     */
+    function duplicate_comment_check($str, $talkId)
+    {
+        $newComment = trim($str);
+        if ($this->user_model->isAuth()) {
+            // Find out if there is at least 1 comment that is made by our
+            // user for this talk
+            $userId = $this->user_model->getId();
+            foreach ($this->talks_model->getUserComments($userId) as $comment) {
+                if ($comment->talk_id == $talkId) {
+                    $thisComment = trim($comment->comment);
+                    if ($thisComment == $newComment) {
+                        $this->validation->set_message(
+                            'duplicate_comment_check',
+                            'Duplicate comment.'
+                        );
+                        return false;
+                    }
+                }
+            }
+        }
         return true;
     }
 }

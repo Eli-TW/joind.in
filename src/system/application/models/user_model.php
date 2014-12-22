@@ -53,17 +53,41 @@ class User_model extends Model
      *
      * @param string  $user     Username
      * @param string  $pass     Password
-     * @param boolean $plaintxt Flag to treat incoming password as plaintext or md5
+     * @param boolean $isMd5    Flag to indicate whether incoming password 
+     *                          is plaintext or md5
      *
      * @return boolean
      */
-    public function validate($user, $pass, $plaintxt = false)
+    public function validate($user, $userPass, $isMd5 = false, CI_Input $input = null)
     {
         $ret   = $this->getUserByUsername($user);
-        $pass  = ($plaintxt) ? $pass : md5($pass);
-        $valid = (isset($ret[0]) && $ret[0]->password == $pass) ? true : false;
+        // make sure we're using an md5 format, passwords are hashed md5s (yes, really)
+        $pass  = ($isMd5) ? $userPass : md5($userPass);
 
-        return $valid;
+        // did we get a row and do the passwords match?
+        if(isset($ret[0])) {
+            if(password_verify($pass, $ret[0]->password)) {
+                return true;
+            } else {
+                // may be the password in the database was stored when CI's
+                // global_xss_filtering was set to true. We can only test for
+                // this if the password passed in was not md5'd.
+                if (false === $isMd5) {
+                    $pass = $input->xss_clean($userPass);
+                    $pass = md5($pass);
+                    if (password_verify($pass, $ret[0]->password)) {
+                        // it was! Let's store the actually $userPass
+                        $password = password_hash(md5($userPass), PASSWORD_DEFAULT);
+
+                        $this->db->where('username', $user);
+                        $this->db->update('user', array('password' => $password));
+                        return true;
+                    }
+                }
+            }
+        }
+
+        return false;
     }
 
     /**

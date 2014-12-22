@@ -16,7 +16,6 @@
  * @license  http://github.com/joindin/joind.in/blob/master/doc/LICENSE JoindIn
  * @link     http://github.com/joindin/joind.in
  */
-
 class Event_model extends Model
 {
     /**
@@ -38,7 +37,7 @@ class Event_model extends Model
      */
     function isUnique($data)
     {
-        $q = $this->db->get_where('events', $data);
+        $q   = $this->db->get_where('events', $data);
         $ret = $q->result();
         return (empty($ret)) ? true : false;
     }
@@ -113,7 +112,7 @@ class Event_model extends Model
      */
     function deleteTalkComments($eid)
     {
-        $talks=$this->getEventTalks($eid);
+        $talks = $this->getEventTalks($eid);
         foreach ($talks as $value) {
             $this->db->where('talk_id', $value->ID);
             $this->db->update('talk_comments', array('active'=>0));
@@ -130,7 +129,7 @@ class Event_model extends Model
      */
     function approvePendingEvent($id)
     {
-        $arr=array(
+        $arr = array(
             'active'    => 1,
             'pending'    => 0
         );
@@ -171,6 +170,7 @@ class Event_model extends Model
         $db->select(
             <<<SQL
             events.*,
+            events.comment_count AS num_comments,
             if (
                 (
                     ((events.event_start - $day_in_seconds) < $now)
@@ -178,13 +178,11 @@ class Event_model extends Model
                 ),
             1, 0) AS allow_comments,
             COUNT(DISTINCT user_attend.ID) AS num_attend,
-            COUNT(DISTINCT event_comments.ID) AS num_comments
 SQL
             , false
         )
             ->from('events')
             ->join('user_attend', 'user_attend.eid=events.ID', 'left')
-            ->join('event_comments', 'event_comments.event_id=events.ID', 'left')
             ->group_by('events.ID');
 
         // for a specific event, site admins always see it - for everyone else, or
@@ -231,6 +229,7 @@ SQL
                 $event->now = (event_isNowOn(
                     $event->event_start, $event->event_end
                 )) ? "now" : "";
+
                 $event->timezoneString = $event->event_tz_cont . '/' . 
                     $event->event_tz_place;
             }
@@ -258,8 +257,8 @@ SQL
         $this->load->helper("events");
         $this->load->helper("talk");
 
-        $private=($includePrivate) ? '' : ' and ifnull(private,0)!=1';
-        $sql='
+        $private = ($includePrivate) ? '' : ' and ifnull(private,0)!=1';
+        $sql     = '
             select
                 talks.talk_title,
                 talks.speaker,
@@ -298,7 +297,8 @@ SQL
                 talks.date_given asc, talks.speaker asc
             ', $this->db->escape($id)
         );
-        $q=$this->db->query($sql);
+
+        $q   = $this->db->query($sql);
         $res = $q->result();
 
         // Loop through the talks deciding if they are currently on
@@ -308,10 +308,10 @@ SQL
             $res = talk_listDecorateNowNext($res);
         }
         
-        $CI=&get_instance();
+        $CI = &get_instance();
         $CI->load->model('talk_speaker_model', 'tsm');
         foreach ($res as $k=>$talk) {
-            $res[$k]->speaker=$CI->tsm->getTalkSpeakers($talk->ID);
+            $res[$k]->speaker = $CI->tsm->getTalkSpeakers($talk->ID);
         }
 
         return $res;
@@ -328,21 +328,21 @@ SQL
      */
     function getEventsOfType($type, $limit = null)
     {
-        $where = null;
+        $where    = null;
         $order_by = null;
 
         if ($type == "hot") {
             // if you change this, change the API too please
-            $order_by = "score - ((num_comments + num_attend + 1) / 5)";
+            $order_by = "score - ((comment_count + num_attend + 1) / 5)";
         }
 
         if ($type == "upcoming") {
             $order_by = "events.event_start asc";
-            $where = '(events.event_start>='. (mktime(0, 0, 0) - (3 * 86400)).')';
+            $where    = '(events.event_start>='. (mktime(0, 0, 0) - (3 * 86400)).')';
         }
 
         if ($type == "past") {
-            $where = '(events.event_end < '.mktime(0, 0, 0).')';
+            $where    = '(events.event_end < '.mktime(0, 0, 0).')';
             $order_by = "events.event_start desc";
         }
 
@@ -362,13 +362,12 @@ SQL
     public function getEvents($where=null, $order_by = null, $limit = null)
     {
         $sql = 'SELECT * ,
-            (select if (event_cfp_start IS NOT NULL AND event_cfp_start > 0 AND ' . 
-                mktime(0, 0, 0) . ' BETWEEN event_cfp_start 
+            events.comment_count AS num_comments,
+            (select if (event_cfp_start IS NOT NULL AND event_cfp_start > 0 AND ' .
+                mktime(0, 0, 0) . ' BETWEEN event_cfp_start
                 AND event_cfp_end, 1, 0)) as is_cfp,
-            (select count(*) from user_attend where user_attend.eid = events.ID) 
+            (select count(*) from user_attend where user_attend.eid = events.ID)
                 as num_attend,
-            (select count(*) from event_comments 
-                where event_comments.event_id = events.ID) as num_comments,
             abs(0) as user_attending,
             abs(
                 datediff(
@@ -392,7 +391,7 @@ SQL
         }
 
         // by default, don't show private events
-        $sql.= " AND private!='Y'";
+        $sql .= " AND private!='Y'";
 
         if ($order_by) {
             $sql .= ' ORDER BY ' . $order_by;
@@ -405,7 +404,7 @@ SQL
         $query  = $this->db->query($sql);
         $result = $query->result();
 
-        $CI=&get_instance();
+        $CI = &get_instance();
         $CI->load->model('tags_events_model', 'eventTags');
         foreach ($result as $index => $event) {
             $result[$index]->eventTags = $CI->eventTags->getTags($event->ID);
@@ -467,8 +466,12 @@ SQL
         $result = $this->getEventsOfType("past", $limit);            
         if ($per_page && $current_page) {
             $total_count = count($result) / $per_page;
-            $result      = array_slice($result, ($current_page * $per_page),
-                $per_page);
+            $result      = array_slice(
+                $result,
+                ($current_page * $per_page),
+                $per_page
+            );
+
             $result['total_count'] = $total_count;
         }
         
@@ -486,14 +489,13 @@ SQL
      */
     public function getEventsByTag($tagData)
     {
-        $CI=&get_instance();
+        $CI = &get_instance();
         $CI->load->model('tags_events_model', 'eventTags');
         
         $sql = 'SELECT events.* ,
-            (select count(*) from user_attend 
+            events.comment_count AS num_comments,
+            (select count(*) from user_attend
                 where user_attend.eid = events.ID) as num_attend,
-            (select count(*) from event_comments 
-                where event_comments.event_id = events.ID) as num_comments,
             abs(0) as user_attending,
             abs(
                 datediff(
@@ -537,7 +539,7 @@ SQL
      */
     function getEventAdmins($eid, $all_results=false)
     {
-        $sql=sprintf(
+        $sql = sprintf(
             "
             select
                 u.username,
@@ -576,7 +578,7 @@ SQL
      */
     function hasUserCommentedEvent($eid, $user_id)
     {
-        $sql=sprintf(
+        $sql = sprintf(
             "
             SELECT event_id
             FROM event_comments
@@ -586,6 +588,7 @@ SQL
             $this->db->escape($eid),
             $this->db->escape($user_id)
         );
+
         $q = $this->db->query($sql);
         $r = $q->result();
         
@@ -628,11 +631,13 @@ SQL
         $this->db->select('id');
         $this->db->from('events');
         $this->db->where("lower(event_name)", strtolower($title));
-        $q=$this->db->get();
+        $q = $this->db->get();
         return $q->result();
     }
     
     /**
+     * Retrieves event claims for a given event id
+     *
      * @param mixed $event_id ID of the event 
      *                        Needs to be either a string, or be able to
      *                        convert to a string for use in SQL statement
@@ -642,7 +647,7 @@ SQL
      */
     function getEventClaims($event_id)
     {
-        $sql=sprintf(
+        $sql = sprintf(
             '
             select
                 t.id as talk_id,
@@ -665,8 +670,9 @@ SQL
             ',
             $this->db->escape($event_id)
         );
-        $q=$this->db->query($sql);
-        $ret=$q->result();
+
+        $q   = $this->db->query($sql);
+        $ret = $q->result();
         
         return $ret;
     }
@@ -690,7 +696,7 @@ SQL
     {
         $this->load->helper('events');
         
-        $sql=sprintf(
+        $sql = sprintf(
             "
             select
                 ts.speaker_id,
@@ -709,12 +715,13 @@ SQL
             ",
             $eid
         );
+
         $query  = $this->db->query($sql);
         $claims = $query->result();
         
         $claimedTalks = array();
         foreach ($claims as $claim) {
-            $claimedTalks[$claim->talk_id][$claim->speaker_id]=$claim;
+            $claimedTalks[$claim->talk_id][$claim->speaker_id] = $claim;
         }
         
         // This gives us a return array of all of the claimed talks
@@ -748,7 +755,7 @@ SQL
             $order_by = 't.ID';
         }
 
-        $sql=sprintf(
+        $sql = sprintf(
             '
             select
                 t.talk_title,
@@ -772,7 +779,8 @@ SQL
             $this->db->escape($eid),
             $order_by
         );
-        $q=$this->db->query($sql);
+
+        $q = $this->db->query($sql);
         return $q->result();
     }
 
@@ -791,7 +799,7 @@ SQL
      */
     function getEventRelatedSessions($id)
     {
-        $sql=sprintf(
+        $sql = sprintf(
             '
             select
                 talks.talk_title,
@@ -826,7 +834,8 @@ SQL
             ',
             $this->db->escape($id)
         );
-        $q=$this->db->query($sql);
+
+        $q = $this->db->query($sql);
         return $q->result();
     }
     
@@ -837,15 +846,22 @@ SQL
      *
      * @uses Event_model::getEvents()
      */
-    public function getCurrentCfp()
+    public function getCurrentCfp($soon = false)
     {
-        $where = 'event_cfp_start <= ' 
-            . mktime( 0, 0, 0, date('m'), date('d'), date('Y')) 
+        $where    = 'event_cfp_start <= '
+            . mktime(0, 0, 0, date('m'), date('d'), date('Y'))
             . ' AND ' . 'event_cfp_end >= ' 
-            . mktime( 0, 0, 0, date('m'), date('d'), date('Y')
-        );
+            . mktime(0, 0, 0, date('m'), date('d'), date('Y'));
+
+        if($soon) {
+            // only show CfPs finishing soon; some are open for ages
+            $cutoff = new DateTime();
+            $cutoff->add(new DateInterval('P6W'));
+            $where .= ' AND event_cfp_end < ' . $cutoff->format('U');
+        }
+
         $order_by = "events.event_cfp_end asc";
-        $result = $this->getEvents($where, $order_by, null);
+        $result   = $this->getEvents($where, $order_by, null);
         return $result;
     }
 
@@ -881,18 +897,12 @@ SQL
 
         $this->db->select(
             'events.*,
-            COUNT(DISTINCT user_attend.ID) AS num_attend,
-            COUNT(DISTINCT event_comments.ID) AS num_comments,' .
+            COUNT(DISTINCT user_attend.ID) AS num_attend,' .
             $attend
         );
         $this->db->from('events');
         $this->db->join('user_attend', 'user_attend.eid = events.ID', 'left');
-        $this->db->join(
-            'event_comments', 
-            'event_comments.event_id = events.ID', 
-            'left'
-        );
-        
+
         //if we have the dates, limit by them
         if ($start>0) { 
             $this->db->where('event_start >=', $start); 
@@ -912,8 +922,44 @@ SQL
         $this->db->group_by('events.ID');
         $this->db->order_by('event_start DESC');
 
-        $q=$this->db->get();
+        $q = $this->db->get();
         return $q->result();
+    }
+
+    /**
+     * Update the cached count of comments for a specific event
+     *
+     * @param $event_id
+     * @return bool
+     */
+    function cacheCommentCount($event_id) {
+        $sql = sprintf("UPDATE events e SET comment_count = (SELECT COUNT(*) FROM event_comments ec WHERE ec.event_id = e.ID) WHERE e.ID = %s", $this->db->escape($event_id));
+
+        return $this->db->query($sql);
+    }
+
+    /**
+     * Update the cached count of talks for a specific event
+     *
+     * @param $event_id
+     * @return bool
+     */
+    function cacheTalkCount($event_id) {
+        $sql = sprintf("UPDATE events e SET talk_count = (SELECT COUNT(*) FROM talks t WHERE t.event_id = e.ID) WHERE e.ID = %s", $this->db->escape($event_id));
+
+        return $this->db->query($sql);
+    }
+
+    /**
+     * Update the cached count of tracks for a specific event
+     *
+     * @param $event_id
+     * @return bool
+     */
+    function cacheTrackCount($event_id) {
+        $sql = sprintf("UPDATE events e SET track_count = (SELECT COUNT(*) FROM event_track et WHERE et.event_id = e.ID) WHERE e.ID = %s", $this->db->escape($event_id));
+
+        return $this->db->query($sql);
     }
 }
 

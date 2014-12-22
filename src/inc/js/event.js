@@ -17,15 +17,6 @@ JI_event = function (){
 		return false;
 	}
 	
-	var _claimEvent = function(){
-		$('#claim-event-btn').click(function(){
-			var obj={ "eid": $('#eid').val() };
-			apiRequest('event','claim',obj,function(obj){
-				notifications.alert(obj.msg);
-			});
-		});
-	}
-	
 	var _toggleAttendees = function(){
 		var el = this;
 		$('#toggle-attendees').click(function(){
@@ -98,21 +89,40 @@ JI_event = function (){
 			$('#stub_display').html('http://joind.in/event/'+$(this).val());
 		});
 	}
+
+	var talkCommentsPage = 0;
+	var _loadTalkComments = function(){
+		var el = $('#talk-comments');
+		if (el.length === 0) {
+			// we're on the edit page return early
+			return;
+		}
+ 		var eid = $('#eid').val();
+		talkCommentsPage++;
+
+		$('#more-talk-comments').remove();
+
+ 		el.append(
+			$('<div>Loading...</div>')
+				.load('/event/talk_comments/' + eid + '/' + talkCommentsPage)
+		);
+	}
 	
 	return {
 		init: function(){
 			$(document).ready(function(){
 				_deleteEventComment();
 				_toggleAttendees();
-				_claimEvent();
 				_toggleEventFieldsets();
 				_updateStub();
+				_loadTalkComments();
 			});
 		},
 		hideFieldsets: function(fieldsToHide){
 			$(document).ready(function(){
 				_hideFieldsets(fieldsToHide);
 			});
-		}
+		},
+		loadMoreTalkComments: _loadTalkComments
 	}
 }();

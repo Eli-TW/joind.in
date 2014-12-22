@@ -132,8 +132,11 @@ class twitter_oauth
      *
      * @return array access token and token secret
      */
-    public function get_access_token($token = false, $secret = false, $verifier = false)
-    {
+    public function get_access_token(
+        $token = false,
+        $secret = false,
+        $verifier = false
+    ) {
         //If no request token was specified then attempt to get one from the url
         if ($token === false && isset($_GET['oauth_token'])) {
             $token = $_GET['oauth_token'];
@@ -189,7 +192,7 @@ class twitter_oauth
     {
         $ch = curl_init($url);
         curl_setopt($ch, CURLOPT_HTTPAUTH, CURLAUTH_BASIC);
-        curl_setopt($ch, CURLOPT_SSLVERSION, 3);
+        curl_setopt($ch, CURLOPT_SSLVERSION, 1);
         curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
         curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, 2);
         curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);

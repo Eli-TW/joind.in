@@ -40,7 +40,7 @@ class Spam
     public function check($chk, $val, $source = 'db')
     {
         $this->CI = & get_instance();
-        $pass = $this->{'chk_' . $chk}($val);
+        $pass     = $this->{'chk_' . $chk}($val);
 
         return $pass;
     }
@@ -68,6 +68,9 @@ class Spam
     public function fetch_txt($type = 'regex')
     {
         $txt_list = $this->CI->config->item('blacklist_' . $type);
+        if (!$txt_list) {
+            return array();
+        }
         return file($txt_list);
     }
 

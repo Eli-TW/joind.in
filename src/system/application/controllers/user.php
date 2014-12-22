@@ -198,7 +198,7 @@ class User extends AuthAbstract
                     $pass .= $sel[$r];
                 }
                  $arr = array(
-                    'password' => md5($pass),
+                    'password' => password_hash(md5($pass), PASSWORD_DEFAULT),
                     'request_code' => null
 
                  );
@@ -393,9 +393,6 @@ class User extends AuthAbstract
             null, null, null, true
         );
 
-        $this->load->model('user_admin_model', 'uam');
-        $arr['event_claims'] = $this->uam->getPendingClaims('event');
-
         $this->template->write_view('content', 'user/main', $arr);
         $this->template->render();
     }
@@ -491,7 +488,6 @@ class User extends AuthAbstract
         $uid = $this->session->userdata('ID');
         $arr = array(
             'curr_data'      => $this->user_model->getUserById($uid),
-            'event_claims'   => $this->uam->getPendingClaims('event'),
             'pending_events' => $this->event_model->getEventDetail(
                 null, null, null, true
             ),
@@ -523,7 +519,7 @@ class User extends AuthAbstract
 
             $pass = $this->input->post('pass');
             if (!empty($pass)) {
-                $data['password'] = $this->validation->pass;
+                $data['password'] = password_hash($this->validation->pass, PASSWORD_DEFAULT);
             }
 
             $this->db->where('ID', $uid);
@@ -653,6 +649,11 @@ class User extends AuthAbstract
             'msg'         => $msg
         );
 
+        $this->load->model('event_model');
+        $arr['pending_events'] = $this->event_model->getEventDetail(
+            null, null, null, true
+        );
+
         $this->template->write_view('content', 'user/admin', $arr);
         $this->template->render();
     }
@@ -667,7 +668,7 @@ class User extends AuthAbstract
     function start_up_check($p)
     {
         $u   = $this->input->post('user');
-        $ret = $this->user_model->validate($u, $p);
+        $ret = $this->user_model->validate($u, $p, false, $this->input);
 
         if (!$ret) {
             $this->validation->set_message(
@@ -829,8 +830,12 @@ class User extends AuthAbstract
     {
         if (!$this->user_model->isAuth()) {
             // Explicitly set the URL to return to
-            // Relying on the referrer being present can cause issues when it isn't present
-            $this->session->set_flashdata("url_after_login", $this->input->server("REQUEST_URI"));
+            // Relying on the referrer being present can cause issues when it
+            // isn't present
+            $this->session->set_flashdata(
+                "url_after_login",
+                $this->input->server("REQUEST_URI")
+            );
             redirect('user/login', 'refresh');
         }
 
@@ -882,7 +887,11 @@ class User extends AuthAbstract
                 $access_token        = $this->user_admin_model
                     ->oauthAllow($api_key, $this->session->userdata('ID'));
                 if (!empty($callback)) {
-                    $url = $this->makeOAuthCallbackURL($callback, $state, $access_token);
+                    $url = $this->makeOAuthCallbackURL(
+                        $callback,
+                        $state,
+                        $access_token
+                    );
                     // add our parameter onto the URL
 
                     // Don't use the CodeIgniter redirect() call here
@@ -892,10 +901,11 @@ class User extends AuthAbstract
                     exit; // we shouldn't be here
                 }
             } else {
-                $view_data['status'] = "deny";
+                $view_data['status']       = "deny";
                 $view_data['callback_url'] = '';
                 if (!empty($callback)) {
                     $url = $this->makeOAuthCallbackURL($callback, $state);
+
                     $view_data['callback_url'] = $url;
                 }
             }
@@ -908,9 +918,10 @@ class User extends AuthAbstract
      * Generate a callback URL including access tokens etc
      * for OAuth rqeuests
      *
-     * @param string $callback Supplied callback URL
-     * @param string $state Any user-supplied data to send back to the caller
+     * @param string $callback     Supplied callback URL
+     * @param string $state        Any user-supplied data to send back to the caller
      * @param string $access_token A valid OAuth access token
+     *
      * @return string The full URL to redirect the user to
      */
     function makeOAuthCallbackURL($callback, $state, $access_token = "")

@@ -138,7 +138,7 @@ class Event extends Controller
         case 'hot':
             // hot is the default case
         default:
-            $events = $this->event_model->getHotEvents(null);
+            $events = $this->event_model->getHotEvents(100);
             break;
         }
         if (isset($events['total_count'])) {
@@ -152,6 +152,10 @@ class Event extends Controller
             $e->user_attending = ($uid)
                 ? $this->user_attend_model->chkAttend($uid, $e->ID)
                 : false;
+
+            if ($type == 'pending') {
+                $e->admins = $this->event_model->getEventAdmins($e->ID);
+            }
         }
 
         $reqkey = buildReqKey();
@@ -172,7 +176,7 @@ class Event extends Controller
         );
         $this->template->write_view('content', 'event/main', $arr, true);
 
-        $events = $this->event_model->getCurrentCfp();
+        $events = $this->event_model->getCurrentCfp(true);
         $this->template->parse_view(
             'sidebar2',
             'event/_event-cfp-sidebar',
@@ -603,6 +607,12 @@ class Event extends Controller
                 'event_cfp_url'       => $this->input->post('cfp_url')
             );
 
+			// The database has a unique constraint on event_stub, and empty strings
+			// break that constraint to they have to be null'd
+			if ($arr['event_stub'] == '') {
+				$arr['event_stub'] = null;
+			}
+
             $is_cfp = $this->input->post('is_cfp');
             if ($is_cfp) {
 
@@ -736,7 +746,7 @@ class Event extends Controller
         $this->load->helper('events');
         $this->load->helper('tabs');
         $this->load->library('validation');
-        $this->load->library('defensio');
+        $this->load->library('spamcheckservice', array('api_key' => $this->config->item('akismet_key')));
         $this->load->library('spam');
         $this->load->library('timezone');
         $this->load->library('gravatar');
@@ -891,7 +901,8 @@ class Event extends Controller
             'statistics',
             'evt_related',
             'slides',
-            'tracks'
+            'tracks',
+            'talk_comments'
         );
         if ($opt == 'track') {
             $arr['track_filter'] = $opt_id;
@@ -934,22 +945,18 @@ class Event extends Controller
 
             // If they're logged in, dont bother with the spam check
             if (!$is_auth) {
-                $def_ret = $this->defensio->check(
-                    'Anonymous',
-                    $ec['comment'],
-                    $is_auth,
-                    '/event/view/' . $id
-                );
-                $is_spam = (string)$def_ret->spam;
+                $acceptable_comment = $this->spamcheckservice->isCommentAcceptable(array(
+                    'comment' => $ec['comment'],
+                ));
             } else {
-                $is_spam = 'false';
+                $acceptable_comment = true;
             }
 
-            // $this->spam->check('regex', $ec['comment']);
-
-            if ($is_spam == 'false') {
+            if ($acceptable_comment) {
                 $this->db->insert('event_comments', $ec);
                 $arr['msg'] = 'Comment inserted successfully!';
+
+                $this->event_model->cacheCommentCount($id);
 
                 if (isset($def_ret)) {
                     $ec['def_resp_spamn'] = (string)$def_ret->spaminess;
@@ -977,11 +984,7 @@ class Event extends Controller
                     "event/view/$id#comments\n\n";
 
                 // Create list of email addresses to send feedback to
-                $to           = array();
-                $admin_emails = $this->user_model->getSiteAdminEmail();
-                foreach ($admin_emails as $user) {
-                    $to[] = $user->email;
-                }
+                $to     = array();
                 $admins = $this->event_model->getEventAdmins($id);
                 foreach ($admins as $ak => $av) {
                     $to[] = $av->email;
@@ -1007,22 +1010,29 @@ class Event extends Controller
         }
 
         $arr['comments'] = $this->event_comments_model->getEventComments($id);
-        $event = $events[0];
-        $tz = "UTC"; // default
-        if(!empty($event->event_tz_cont) && !empty($event->event_tz_place)) {
+        $event           = $events[0];
+        $tz              = "UTC"; // default
+        if (!empty($event->event_tz_cont) && !empty($event->event_tz_place)) {
             $tz = $event->event_tz_cont . '/' . $event->event_tz_place;
         }
         for ($i = 0; $i < count($arr['comments']); $i++) {
             if ($arr['comments'][$i]->user_id != 0) {
-                $arr['comments'][$i]->user_comment_count =
-                    $this->event_comments_model->getUserCommentCount($arr['comments'][$i]->user_id) +
-                    $this->tcm->getUserCommentCount($arr['comments'][$i]->user_id);
+                $arr['comments'][$i]->user_comment_count
+                    = $this->event_comments_model->getUserCommentCount(
+                        $arr['comments'][$i]->user_id
+                    ) +
+                    $this->tcm->getUserCommentCount(
+                        $arr['comments'][$i]->user_id
+                    );
             }
 
             // sort out timezones
             $comment_datetime = $this->timezone->getDateTimeFromUnixtime(
-                $arr['comments'][$i]->date_made, $tz);
-            $arr['comments'][$i]->display_datetime = $comment_datetime->format('d.M.Y \a\t H:i');
+                $arr['comments'][$i]->date_made,
+                $tz
+            );
+            $arr['comments'][$i]->display_datetime
+                = $comment_datetime->format('d.M.Y \a\t H:i');
         }
 
         if (!$is_auth) {
@@ -1142,6 +1152,63 @@ class Event extends Controller
     }
 
     /**
+     * Displays the list of talk comments for the given event.
+     *
+     * @param integer $id   The id of the event
+     * @param integer $page Page num
+     *
+     * @return void
+     */
+    function talk_comments($id, $page = 1)
+    {
+        $this->load->model('talk_comments_model');
+        $this->load->model('event_comments_model');
+
+        $commentsPerPage = 20;
+        $offset = null;
+
+        if (!empty($page) && $page > 1) {
+            $offset = ($page - 1) * $commentsPerPage;
+        }
+
+        // Load one extra record, so we know if there are more
+        $comments = $this->talk_comments_model->getEventTalkComments(
+            $id,
+            ($commentsPerPage + 1),
+            $offset
+        );
+
+        $moreComments = false;
+        if (isset($comments)) {
+            if (count($comments) > $commentsPerPage) {
+                array_pop($comments);
+                $moreComments = true;
+            }
+
+            for ($i = 0; $i < count($comments); $i++) {
+                if ($comments[$i]->user_id != 0) {
+                    $comments[$i]->user_comment_count =
+                        $this->event_comments_model->getUserCommentCount(
+                            $comments[$i]->user_id
+                        ) +
+                        $this->talk_comments_model->getUserCommentCount(
+                            $comments[$i]->user_id
+                        );
+                }
+            }
+        }
+
+        $arr = array(
+            'comments' => $comments,
+            'page' => $page,
+            'moreComments' => $moreComments
+        );
+
+        $this->template->write_view('content', 'event/talk_comments', $arr, true);
+        echo $this->template->render('content');
+    }
+
+    /**
      * Deletes an event.
      *
      * Only the site of event admin can delete an event.
@@ -1195,7 +1262,7 @@ class Event extends Controller
         $this->load->library('validation');
         $this->load->plugin('captcha');
         $this->load->helper('custom_timezone');
-        $this->load->library('defensio');
+        $this->load->library('spamcheckservice', array('api_key' => $this->config->item('akismet_key')));
         $this->load->library('timezone');
         $this->load->model('user_admin_model');
 
@@ -1334,6 +1401,12 @@ class Event extends Controller
                 'event_contact_email' =>
                 $this->input->post('event_contact_email'),
             );
+			
+			// The database has a unique constraint on event_stub, and empty strings
+			// break that constraint to they have to be null'd
+			if ($sub_arr['event_stub'] == '') {
+				$sub_arr['event_stub'] = null;
+			}
 
             // check to see if our Call for Papers dates are set...
             $cfp_check = $this->input->post('cfp_start_mo');
@@ -1364,23 +1437,24 @@ class Event extends Controller
                 $sub_arr['event_cfp_url'] = $this->input->post('cfp_url');
             }
 
-            $is_auth  = $this->user_model->isAuth();
-            $cname    = $this->input->post('event_contact_name');
-            $ccomment = $this->input->post('event_desc');
-            $def      = $this->defensio->check(
-                $cname,
-                $ccomment,
-                $is_auth,
-                '/event/submit'
-            );
-            $is_spam  = (string)$def->spam;
+            // Only do the spam check if the user isn't an event admin
+            // on another event and an admin user hasn't checked the
+            // 'bypass spam filter' checkbox.
+            $isAdmin = (bool)$this->user_admin_model->getUserEventAdmin($this->session->userdata('ID'));
+            $bypassSpamFilter = $this->input->post('bypass_spam_filter') && $this->user_model->isSiteAdmin();
+            $is_spam = false;
+            if ($isAdmin == false && $bypassSpamFilter == false) {
+                $is_auth  = $this->user_model->isAuth();
+                $cname    = $this->input->post('event_contact_name');
+                $ccomment = $this->input->post('event_desc');
 
-            $bypassSpamFilter = $this->input->post('bypass_spam_filter');
-            if ($bypassSpamFilter == 1) {
-                $is_spam = false;
+                $acceptable_comment = $this->spamcheckservice->isCommentAcceptable(array(
+                    'comment' => $ccomment,
+                ));
+                $is_spam = !$acceptable_comment;
             }
 
-            if ($is_spam != 'true') {
+            if ($is_spam == false) {
                 //send the information via email...
                 $subj = 'Event submission from ' .
                     $this->config->item('site_name');
@@ -1431,6 +1505,17 @@ class Event extends Controller
                     'Please <a href="' .
                     $this->config->item('email_submissions') .
                     '">send us an email</a> with all the details!';
+            }
+        } else {
+            /**
+             * The escaping on some fields is done twice in:
+             * - $this->validation->run().
+             * - views\event\submit.php
+             * Undoing the escaping when the validation fails.
+             */
+            $escaped_fields = array('event_title', 'event_desc', 'event_loc', 'event_contact_name', 'event_contact_email', 'event_stub');
+            foreach ($escaped_fields as $field_name) {
+                $this->validation->$field_name = html_entity_decode($this->validation->$field_name);
             }
         }
         $arr['is_auth']       = $this->user_model->isAuth();
@@ -1652,61 +1737,6 @@ class Event extends Controller
         }
 
         return $result;
-    }
-
-    /**
-     * Manage the claims that have been made on events.
-     *
-     * Not the same as the claims on talks in an event.
-     *
-     * @param int $id [optional] ID of claim for event
-     *
-     * @return void
-     */
-    function claims($id = null)
-    {
-        if (!$this->user_model->isSiteAdmin()
-            && !$this->user_model->isAdminEvent($id)
-        ) {
-            redirect('event/view/' . $id);
-        }
-
-        $this->load->model('user_admin_model', 'uam');
-
-        $claims        = $this->uam->getPendingClaims('event');
-        $posted_claims = $this->input->post('claim');
-        $sub           = $this->input->post('sub');
-
-        if (isset($sub) && !empty($posted_claims)) {
-            foreach ($posted_claims as $uam_key => $claim) {
-                if ($this->user_model->isSiteAdmin()
-                    || $this->uam->checkPerm($uam_key, $id, 'event')
-                ) {
-                    switch (strtolower($claim)) {
-                    case 'approve':
-                        // approve the claim
-                        $this->uam->updatePerm(
-                            $uam_key,
-                            array('rcode' => '')
-                        );
-                        break;
-                    case 'deny':
-                        // deny the claim - delete it!
-                        $this->uam->removePerm($uam_key);
-                        break;
-                    }
-                }
-            }
-        }
-
-        $claims = $this->uam->getPendingClaims('event', $id);
-        $arr    = array(
-            'claims' => $claims,
-            'id'     => $id
-        );
-
-        $this->template->write_view('content', 'event/claims', $arr);
-        $this->template->render();
     }
 
     /**
